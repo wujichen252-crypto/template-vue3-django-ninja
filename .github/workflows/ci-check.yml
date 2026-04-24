@@ -1,0 +1,84 @@
+name: CI Check
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  FRONTEND_DIR: ${{ vars.PROJECT_FRONTEND_DIR || './frontend' }}
+  BACKEND_DIR: ${{ vars.PROJECT_BACKEND_DIR || './backend' }}
+  PYTHON_VER: ${{ vars.PYTHON_VERSION || '3.11' }}
+  NODE_VER: ${{ vars.NODE_VERSION || '20' }}
+  REQUIREMENTS: ${{ vars.PROJECT_REQUIREMENTS_FILE || 'requirements/base.txt' }}
+
+jobs:
+  frontend-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.FRONTEND_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VER }}
+          cache: 'npm'
+          cache-dependency-path: '${{ env.FRONTEND_DIR }}/package-lock.json'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:coverage
+      - run: npm run build
+
+      - name: Upload Frontend Coverage
+        uses: codecov/codecov-action@v4
+        if: vars.CODECOV_TOKEN != ''
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./frontend/coverage/coverage-final.json
+          flags: frontend
+          name: frontend-coverage
+
+  backend-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.BACKEND_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VER }}
+          cache: 'pip'
+          cache-dependency-path: '${{ env.BACKEND_DIR }}/${{ env.REQUIREMENTS }}'
+
+      - name: Install dependencies
+        run: pip install -r ${{ env.REQUIREMENTS }}
+
+      - name: Django System Check
+        run: python manage.py check --deploy
+        env:
+          DJANGO_SETTINGS_MODULE: ${{ vars.DJANGO_SETTINGS_MODULE || 'config.settings.production' }}
+          DJANGO_SECRET_KEY: ci-check-key-not-for-production
+          DB_HOST: localhost
+          DB_PASSWORD: ''
+          REDIS_HOST: localhost
+
+      - name: Run Tests with Coverage
+        run: pytest --cov=apps --cov=core --cov-report=xml --cov-report=term-missing --cov-fail-under=80
+        env:
+          DJANGO_SETTINGS_MODULE: ${{ vars.DJANGO_SETTINGS_MODULE || 'config.settings.production' }}
+          DJANGO_SECRET_KEY: ci-test-key-not-for-production
+          DB_HOST: localhost
+          DB_PASSWORD: ''
+          REDIS_HOST: localhost
+
+      - name: Upload Coverage Report
+        uses: codecov/codecov-action@v4
+        if: vars.CODECOV_TOKEN != ''
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./backend/coverage.xml
+          flags: backend
+          name: backend-coverage

@@ -25,6 +25,8 @@
 - PostgreSQL
 - Redis
 - PyJWT
+- Gunicorn
+- Whitenoise
 
 ## 功能需求
 

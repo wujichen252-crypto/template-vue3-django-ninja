@@ -1,0 +1,23 @@
+[Unit]
+Description=Vue3 Django-Ninja API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/www/template-vue3-django-ninja
+ExecStart=/www/template-vue3-django-ninja/venv/bin/gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8000 -w 4
+Restart=always
+RestartSec=5
+Environment="DJANGO_SETTINGS_MODULE=config.settings.production"
+Environment="DJANGO_SECRET_KEY=your-production-secret-key-here"
+Environment="DB_HOST=localhost"
+Environment="DB_NAME=template_db"
+Environment="DB_USER=postgres"
+Environment="DB_PASSWORD=your-db-password"
+Environment="REDIS_HOST=localhost"
+Environment="REDIS_PORT=6379"
+Environment="JWT_SECRET=your-jwt-secret-key"
+
+[Install]
+WantedBy=multi-user.target

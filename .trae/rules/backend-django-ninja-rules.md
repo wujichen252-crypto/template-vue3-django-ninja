@@ -8,6 +8,10 @@
 - Redis
 - PyJWT
 - Pydantic
+- psycopg2-binary (PostgreSQL 驱动)
+- python-dotenv (环境变量)
+- bcrypt (密码哈希)
+- django-redis (Redis 缓存)
 
 ## 项目结构
 

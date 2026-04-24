@@ -133,6 +133,35 @@ pip install -r requirements/production.txt
 gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4
 ```
 
+### Docker 部署
+
+#### 后端
+
+```bash
+# 构建镜像
+docker build -t template-backend:latest .
+
+# 运行容器
+docker run -d -p 8000:8000 \
+  -e DJANGO_SECRET_KEY=your-secret-key \
+  -e DB_NAME=template_db \
+  -e DB_USER=postgres \
+  -e DB_PASSWORD=your-password \
+  -e DB_HOST=host.docker.internal \
+  -e REDIS_HOST=host.docker.internal \
+  template-backend:latest
+```
+
+#### 前端
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+将 `dist` 目录部署到 Nginx 或 CDN
+
 ### 宝塔面板部署
 
 1. 宝塔 → 网站 → Python 项目 → 添加项目

@@ -1,0 +1,235 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '部署环境'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  FRONTEND_DIR: ${{ vars.PROJECT_FRONTEND_DIR || './frontend' }}
+  BACKEND_DIR: ${{ vars.PROJECT_BACKEND_DIR || './backend' }}
+  NODE_VER: ${{ vars.NODE_VERSION || '20' }}
+  REQUIREMENTS: ${{ vars.PROJECT_REQUIREMENTS_FILE || 'requirements/base.txt' }}
+
+jobs:
+  # ==========================================
+  # Job 1: 构建前端
+  # ==========================================
+  build-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.FRONTEND_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VER }}
+          cache: 'npm'
+          cache-dependency-path: '${{ env.FRONTEND_DIR }}/package-lock.json'
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: ${{ env.FRONTEND_DIR }}/dist
+          retention-days: 3
+
+  # ==========================================
+  # Job 2: 后端检查与打包
+  # ==========================================
+  package-backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.BACKEND_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ vars.PYTHON_VERSION || '3.11' }}
+          cache: 'pip'
+          cache-dependency-path: '${{ env.BACKEND_DIR }}/${{ env.REQUIREMENTS }}'
+
+      - run: pip install -r ${{ env.REQUIREMENTS }}
+      - run: python manage.py test
+        env:
+          DJANGO_SETTINGS_MODULE: ${{ vars.DJANGO_SETTINGS_MODULE || 'config.settings.production' }}
+          DJANGO_SECRET_KEY: ci-test-key
+          DB_HOST: localhost
+          DB_PASSWORD: ''
+          REDIS_HOST: localhost
+
+      # 将后端代码打包为 tarball，方便一次性上传
+      - name: Package backend
+        run: |
+          cd ..
+          tar -czf backend.tar.gz \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.git' \
+            --exclude='venv' \
+            ${{ env.BACKEND_DIR }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-source
+          path: backend.tar.gz
+          retention-days: 3
+
+  # ==========================================
+  # Job 3: 部署（带前置条件检查）
+  # ==========================================
+  deploy:
+    needs: [build-frontend, package-backend]
+    runs-on: ubuntu-latest
+
+    # 防御性条件：关键变量未配置时直接跳过
+    if: |
+      vars.DEPLOY_SERVER_HOST != '' &&
+      vars.DEPLOY_FRONTEND_PATH != '' &&
+      vars.DEPLOY_BACKEND_PATH != '' &&
+      secrets.SSH_PRIVATE_KEY != ''
+
+    steps:
+      # 下载前端产物
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: ./dist
+
+      # 下载后端源码包
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-source
+          path: ./
+
+      # 部署前端静态文件
+      - name: Deploy Frontend
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.DEPLOY_SERVER_HOST }}
+          username: ${{ vars.DEPLOY_SERVER_USER || 'root' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ vars.DEPLOY_SERVER_PORT || '22' }}
+          source: "dist/*"
+          target: ${{ vars.DEPLOY_FRONTEND_PATH }}
+          strip_components: 1
+
+      # 部署后端源码包
+      - name: Deploy Backend Tarball
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.DEPLOY_SERVER_HOST }}
+          username: ${{ vars.DEPLOY_SERVER_USER || 'root' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ vars.DEPLOY_SERVER_PORT || '22' }}
+          source: "backend.tar.gz"
+          target: /tmp/
+
+      # 服务器端解压、安装、迁移、重启
+      - name: Execute Backend Deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ vars.DEPLOY_SERVER_HOST }}
+          username: ${{ vars.DEPLOY_SERVER_USER || 'root' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ vars.DEPLOY_SERVER_PORT || '22' }}
+          script: |
+            set -e
+
+            BACKEND_PATH="${{ vars.DEPLOY_BACKEND_PATH }}"
+            VENV_PATH="${{ vars.DEPLOY_VENV_PATH }}"
+            REQUIREMENTS_FILE="${{ vars.PROJECT_REQUIREMENTS_FILE || 'requirements/base.txt' }}"
+            SETTINGS_MODULE="${{ vars.DJANGO_SETTINGS_MODULE || 'config.settings.production' }}"
+            ENABLE_MIGRATE="${{ vars.ENABLE_MIGRATE || 'true' }}"
+            ENABLE_COLLECTSTATIC="${{ vars.ENABLE_COLLECTSTATIC || 'false' }}"
+            RESTART_CMD="${{ vars.DEPLOY_RESTART_COMMAND || 'sudo systemctl restart template-vue3-django-ninja' }}"
+
+            echo "===== 开始部署后端 ====="
+
+            # 进入后端目录（如果不存在则创建）
+            mkdir -p "$BACKEND_PATH"
+            cd "$BACKEND_PATH"
+
+            # 备份当前版本（以防回滚）
+            if [ -d "apps" ] || [ -f "manage.py" ]; then
+              BACKUP_NAME="backup_$(date +%Y%m%d_%H%M%S)"
+              tar -czf "/tmp/$BACKUP_NAME.tar.gz" --exclude='venv' --exclude='__pycache__' . || true
+              echo "已备份: /tmp/$BACKUP_NAME.tar.gz"
+            fi
+
+            # 解压新代码（tarball 包含 backend/ 目录，需要处理层级）
+            tar -xzf /tmp/backend.tar.gz -C /tmp/
+
+            # 将 /tmp/backend/ 下的内容同步到目标路径（保留 venv）
+            rsync -a --delete \
+              --exclude='venv' \
+              --exclude='.env' \
+              --exclude='__pycache__' \
+              --exclude='*.pyc' \
+              --exclude='db.sqlite3' \
+              /tmp/${{ env.BACKEND_DIR }}/ ./ || true
+
+            # 激活虚拟环境（如果配置了）
+            if [ -n "$VENV_PATH" ] && [ -f "$VENV_PATH/bin/activate" ]; then
+              source "$VENV_PATH/bin/activate"
+              echo "已激活虚拟环境: $VENV_PATH"
+            else
+              echo "未配置虚拟环境，使用系统 Python"
+            fi
+
+            # 安装/更新依赖
+            pip install -r "$REQUIREMENTS_FILE" --quiet
+
+            # 设置环境变量（从 Secrets 读取的 SECRET_KEY 等由 systemd 管理，这里仅用于 migrate）
+            export DJANGO_SETTINGS_MODULE="$SETTINGS_MODULE"
+
+            # 数据库迁移（默认开启，可通过变量关闭）
+            if [ "$ENABLE_MIGRATE" == "true" ]; then
+              echo "执行数据库迁移..."
+              python manage.py migrate --noinput
+            else
+              echo "跳过数据库迁移"
+            fi
+
+            # 收集静态文件（可选，主要给 Django Admin 和 API Docs 用）
+            if [ "$ENABLE_COLLECTSTATIC" == "true" ]; then
+              echo "收集静态文件..."
+              python manage.py collectstatic --noinput
+            fi
+
+            # 执行重启命令
+            echo "重启服务..."
+            eval "$RESTART_CMD"
+
+            # 简单健康检查（如果配置了端口）
+            if [ -n "${{ vars.APP_PORT }}" ]; then
+              sleep 3
+              if curl -sf http://127.0.0.1:${{ vars.APP_PORT }}/api/health || curl -sf http://127.0.0.1:${{ vars.APP_PORT }}/api/docs > /dev/null 2>&1; then
+                echo "健康检查通过"
+              else
+                echo "警告：服务可能未正常启动，请手动检查"
+              fi
+            fi
+
+            echo "===== 后端部署完成 ====="
+
+      # 可选：部署通知
+      - name: Notify
+        if: vars.DEPLOY_NOTIFY_WEBHOOK != ''
+        run: |
+          curl -X POST ${{ vars.DEPLOY_NOTIFY_WEBHOOK }} \
+            -H 'Content-Type: application/json' \
+            -d '{"msg":"[Django-Ninja] 部署成功: ${{ github.repository }}@${{ github.sha }}"}' || true
