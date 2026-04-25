@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElForm, ElFormItem, ElInput, ElButton, ElMessage, ElCard } from 'element-plus'
+import { ElForm, ElFormItem, ElInput, ElButton, ElMessage, ElCard, type FormInstance, type FormRules } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
+
+const loginFormRef = ref<FormInstance>()
 
 const loginForm = reactive({
   username: '',
@@ -15,23 +17,35 @@ const loginForm = reactive({
 
 const loading = ref(false)
 
-async function handleLogin() {
-  if (!loginForm.username || !loginForm.password) {
-    ElMessage.warning('请输入用户名和密码')
-    return
-  }
+const loginRules: FormRules = {
+  username: [
+    { required: true, message: '请输入用户名', trigger: 'blur' },
+    { min: 3, max: 32, message: '用户名长度在 3-32 个字符', trigger: 'blur' }
+  ],
+  password: [
+    { required: true, message: '请输入密码', trigger: 'blur' },
+    { min: 8, message: '密码长度不能少于 8 个字符', trigger: 'blur' }
+  ]
+}
 
-  loading.value = true
-  try {
-    await authStore.login(loginForm)
-    ElMessage.success('登录成功')
-    const redirect = (route.query.redirect as string) || '/dashboard'
-    router.push(redirect)
-  } catch {
-    ElMessage.error('登录失败，请检查用户名和密码')
-  } finally {
-    loading.value = false
-  }
+async function handleLogin() {
+  if (!loginFormRef.value) return
+
+  await loginFormRef.value.validate(async (valid) => {
+    if (!valid) return
+
+    loading.value = true
+    try {
+      await authStore.login(loginForm)
+      ElMessage.success('登录成功')
+      const redirect = (route.query.redirect as string) || '/dashboard'
+      router.push(redirect)
+    } catch {
+      ElMessage.error('登录失败，请检查用户名和密码')
+    } finally {
+      loading.value = false
+    }
+  })
 }
 </script>
 
@@ -45,8 +59,8 @@ async function handleLogin() {
         </div>
       </template>
 
-      <el-form :model="loginForm" @submit.prevent="handleLogin">
-        <el-form-item>
+      <el-form ref="loginFormRef" :model="loginForm" :rules="loginRules" @submit.prevent="handleLogin">
+        <el-form-item prop="username">
           <el-input
             v-model="loginForm.username"
             placeholder="用户名"
@@ -54,7 +68,7 @@ async function handleLogin() {
             prefix-icon="User"
           />
         </el-form-item>
-        <el-form-item>
+        <el-form-item prop="password">
           <el-input
             v-model="loginForm.password"
             type="password"

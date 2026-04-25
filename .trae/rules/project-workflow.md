@@ -19,12 +19,27 @@ npm run dev
 #### 后端开发
 ```bash
 cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements/local.txt
+
+# 安装 uv（如未安装）
+# Windows PowerShell: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 同步依赖（根据 uv.lock 安装，含开发依赖）
+uv sync
+
+# 或仅同步生产依赖
+# uv sync --no-dev
+
 cp .env.example .env
-python manage.py migrate
-python manage.py runserver
+
+# 使用 uv run 运行命令（自动激活虚拟环境）
+uv run python manage.py migrate
+uv run python manage.py runserver
+
+# 运行测试
+uv run pytest
+
+# 代码检查
+uv run ruff check .
 ```
 
 ### 3. 代码规范

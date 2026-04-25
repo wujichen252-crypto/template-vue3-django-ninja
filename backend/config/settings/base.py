@@ -31,6 +31,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'config.middleware.RequestIDMiddleware',
+    'config.middleware.QueryPerformanceMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -80,7 +81,7 @@ STATICFILES_DIRS = []
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# Database
+# Database Configuration with Connection Pooling
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -89,6 +90,15 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        # 连接池配置 - 持久化连接
+        'CONN_MAX_AGE': int(os.getenv('DB_CONN_MAX_AGE', '600')),  # 10分钟
+        'CONN_HEALTH_CHECKS': True,  # 健康检查
+        'OPTIONS': {
+            # 连接超时设置
+            'connect_timeout': 10,
+            # 命令超时设置
+            'options': '-c statement_timeout=30000',  # 30秒查询超时
+        }
     }
 }
 
@@ -118,6 +128,9 @@ JWT_ACCESS_EXPIRE_MINUTES = int(os.getenv('JWT_ACCESS_EXPIRE_MINUTES', '120'))
 JWT_REFRESH_EXPIRE_DAYS = int(os.getenv('JWT_REFRESH_EXPIRE_DAYS', '7'))
 
 # Logging
+SLOW_QUERY_THRESHOLD = 1.0
+MAX_QUERIES_PER_REQUEST = 50
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,

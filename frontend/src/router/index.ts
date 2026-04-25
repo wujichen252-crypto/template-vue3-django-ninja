@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { cancelAllRequests } from '@/utils/request'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -34,7 +35,12 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, _from, next) => {
+router.beforeEach((to, from, next) => {
+  // 页面切换时取消所有待处理的请求
+  if (from.name) {
+    cancelAllRequests()
+  }
+
   const authStore = useAuthStore()
   const requiresAuth = to.meta.requiresAuth
 

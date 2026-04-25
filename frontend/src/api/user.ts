@@ -17,6 +17,10 @@ export const userApi = {
 
   refreshToken(refresh: string) {
     return request.post<ApiResponse<TokenData>>('/auth/refresh', { refresh })
+  },
+
+  logout(token: string) {
+    return request.post<ApiResponse<null>>('/auth/logout', { token })
   }
 }
 

@@ -1,5 +1,12 @@
+/**
+ * 通用数据请求 Composable
+ * 基于 axios 封装，自动注入 token，支持重试、错误处理
+ */
 import { ref, onMounted } from 'vue'
 import type { Ref } from 'vue'
+import request from '@/utils/request'
+import { getToken } from '@/utils/storage'
+import type { AxiosRequestConfig } from 'axios'
 
 interface FetchState<T> {
   data: Ref<T | null>
@@ -7,7 +14,11 @@ interface FetchState<T> {
   error: Ref<Error | null>
 }
 
-export function useFetch<T>(url: string, options?: RequestInit): FetchState<T> {
+export function useFetch<T>(
+  url: string,
+  options?: AxiosRequestConfig,
+  autoFetch = true
+): FetchState<T> & { execute: () => Promise<void> } {
   const data = ref<T | null>(null) as Ref<T | null>
   const loading = ref(false)
   const error = ref<Error | null>(null)
@@ -16,18 +27,12 @@ export function useFetch<T>(url: string, options?: RequestInit): FetchState<T> {
     loading.value = true
     error.value = null
     try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers
-        }
+      const token = getToken()
+      const response = await request.get<T>(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        ...options
       })
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-      const result = await response.json()
-      data.value = result
+      data.value = response.data
     } catch (e) {
       error.value = e as Error
     } finally {
@@ -35,13 +40,16 @@ export function useFetch<T>(url: string, options?: RequestInit): FetchState<T> {
     }
   }
 
-  onMounted(() => {
-    fetchData()
-  })
+  if (autoFetch) {
+    onMounted(() => {
+      fetchData()
+    })
+  }
 
   return {
     data,
     loading,
-    error
+    error,
+    execute: fetchData
   }
 }

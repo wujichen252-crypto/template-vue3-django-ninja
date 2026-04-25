@@ -1,0 +1,197 @@
+name: PR Checklist
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  # 验证 PR 描述
+  validate-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR Description
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            
+            // 检查清单
+            const checks = {
+              hasDescription: body.includes('## 📋 描述'),
+              hasType: body.match(/-\s*\[x\]\s*(🐛|✨|💥|📝|♻️|🎨|⚡|✅|🔧|🚀)/),
+              hasTesting: body.match(/-\s*\[x\]\s*.*测试/),
+              linkedIssue: body.match(/(Fixes|Resolves|Closes|Relates to)\s+#\d+/),
+            };
+            
+            const messages = [];
+            
+            if (!checks.hasDescription) {
+              messages.push('❌ 请填写 PR 描述');
+            }
+            
+            if (!checks.hasType) {
+              messages.push('❌ 请选择更改类型');
+            }
+            
+            if (!checks.hasTesting) {
+              messages.push('⚠️ 建议添加测试');
+            }
+            
+            if (!checks.linkedIssue) {
+              messages.push('⚠️ 建议关联相关 Issue');
+            }
+            
+            if (messages.length > 0) {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## PR 检查清单\n\n${messages.join('\n')}\n\n请完善 PR 描述后重新提交。`
+              });
+              
+              // 如果有错误，标记失败
+              if (messages.some(m => m.startsWith('❌'))) {
+                core.setFailed('PR 描述不完整');
+              }
+            }
+
+  # 自动标记 PR
+  label-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label based on branch name
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const branch = pr.head.ref;
+            const labels = [];
+            
+            // 根据分支名自动添加标签
+            if (branch.startsWith('feature/')) {
+              labels.push('enhancement');
+            } else if (branch.startsWith('fix/') || branch.startsWith('bugfix/')) {
+              labels.push('bug');
+            } else if (branch.startsWith('hotfix/')) {
+              labels.push('hotfix');
+            } else if (branch.startsWith('refactor/')) {
+              labels.push('refactor');
+            } else if (branch.startsWith('docs/')) {
+              labels.push('documentation');
+            } else if (branch.startsWith('perf/')) {
+              labels.push('performance');
+            } else if (branch.startsWith('test/')) {
+              labels.push('testing');
+            }
+            
+            // 根据文件变更添加标签
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            
+            const filePaths = files.data.map(f => f.filename);
+            
+            if (filePaths.some(p => p.startsWith('frontend/'))) {
+              labels.push('frontend');
+            }
+            
+            if (filePaths.some(p => p.startsWith('backend/'))) {
+              labels.push('backend');
+            }
+            
+            if (filePaths.some(p => p.includes('test'))) {
+              labels.push('testing');
+            }
+            
+            if (filePaths.some(p => p.startsWith('.github/workflows/'))) {
+              labels.push('ci/cd');
+            }
+            
+            // 去重并添加标签
+            const uniqueLabels = [...new Set(labels)];
+            if (uniqueLabels.length > 0) {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: uniqueLabels,
+              });
+            }
+
+  # 检查 PR 大小
+  check-size:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR Size
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const additions = pr.additions;
+            const deletions = pr.deletions;
+            const total = additions + deletions;
+            
+            let message = '';
+            let label = '';
+            
+            if (total > 1000) {
+              message = `⚠️ 这个 PR 变更较大 (+${additions}/-${deletions})，建议拆分成更小的 PR`;
+              label = 'large-pr';
+            } else if (total > 500) {
+              message = `📊 这个 PR 中等大小 (+${additions}/-${deletions})`;
+              label = 'medium-pr';
+            } else {
+              message = `✅ 这个 PR 大小合适 (+${additions}/-${deletions})`;
+              label = 'small-pr';
+            }
+            
+            // 添加评论
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message,
+            });
+            
+            // 添加标签
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: [label],
+            });
+
+  # 欢迎新贡献者
+  welcome:
+    runs-on: ubuntu-latest
+    if: github.event.action == 'opened'
+    steps:
+      - name: Welcome First-Time Contributors
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const author = pr.user.login;
+            
+            // 检查是否是首次贡献
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            });
+            
+            const userPulls = pulls.filter(p => p.user.login === author);
+            
+            if (userPulls.length === 1) {
+              // 首次贡献
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `🎉 欢迎 @${author} 首次贡献！\n\n感谢你的 PR！我们的团队会尽快审查。请确保：\n- 已阅读贡献指南\n- 所有检查都已通过\n- PR 描述完整清晰\n\n如有问题，欢迎随时询问！`
+              });
+            }

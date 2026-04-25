@@ -3,233 +3,241 @@ name: Deploy
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       environment:
         description: '部署环境'
         required: true
-        default: 'production'
+        default: 'staging'
         type: choice
         options:
-          - production
           - staging
+          - production
 
 env:
   FRONTEND_DIR: ${{ vars.PROJECT_FRONTEND_DIR || './frontend' }}
   BACKEND_DIR: ${{ vars.PROJECT_BACKEND_DIR || './backend' }}
+  PYTHON_VER: ${{ vars.PYTHON_VERSION || '3.11' }}
   NODE_VER: ${{ vars.NODE_VERSION || '20' }}
-  REQUIREMENTS: ${{ vars.PROJECT_REQUIREMENTS_FILE || 'requirements/base.txt' }}
 
 jobs:
-  # ==========================================
-  # Job 1: 构建前端
-  # ==========================================
+  # 构建前端
   build-frontend:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ env.FRONTEND_DIR }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VER }}
-          cache: 'npm'
-          cache-dependency-path: '${{ env.FRONTEND_DIR }}/package-lock.json'
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-artifact@v4
+          cache: 'pnpm'
+          cache-dependency-path: '${{ env.FRONTEND_DIR }}/pnpm-lock.yaml'
+
+      - name: Install dependencies
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Build for production
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: pnpm run build
+        env:
+          NODE_ENV: production
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
           path: ${{ env.FRONTEND_DIR }}/dist
-          retention-days: 3
+          retention-days: 1
 
-  # ==========================================
-  # Job 2: 后端检查与打包
-  # ==========================================
-  package-backend:
+  # 构建后端 Docker 镜像
+  build-backend:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ env.BACKEND_DIR }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: vars.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
         with:
-          python-version: ${{ vars.PYTHON_VERSION || '3.11' }}
-          cache: 'pip'
-          cache-dependency-path: '${{ env.BACKEND_DIR }}/${{ env.REQUIREMENTS }}'
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - run: pip install -r ${{ env.REQUIREMENTS }}
-      - run: python manage.py test
-        env:
-          DJANGO_SETTINGS_MODULE: ${{ vars.DJANGO_SETTINGS_MODULE || 'config.settings.production' }}
-          DJANGO_SECRET_KEY: ci-test-key
-          DB_HOST: localhost
-          DB_PASSWORD: ''
-          REDIS_HOST: localhost
-
-      # 将后端代码打包为 tarball，方便一次性上传
-      - name: Package backend
-        run: |
-          cd ..
-          tar -czf backend.tar.gz \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='.git' \
-            --exclude='venv' \
-            ${{ env.BACKEND_DIR }}
-
-      - uses: actions/upload-artifact@v4
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          name: backend-source
-          path: backend.tar.gz
-          retention-days: 3
+          images: ${{ vars.DOCKERHUB_USERNAME }}/template-vue3-django-ninja-backend
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
 
-  # ==========================================
-  # Job 3: 部署（带前置条件检查）
-  # ==========================================
-  deploy:
-    needs: [build-frontend, package-backend]
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.BACKEND_DIR }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 部署到测试环境
+  deploy-staging:
+    needs: [build-frontend, build-backend]
     runs-on: ubuntu-latest
-
-    # 防御性条件：关键变量未配置时直接跳过
-    if: |
-      vars.DEPLOY_SERVER_HOST != '' &&
-      vars.DEPLOY_FRONTEND_PATH != '' &&
-      vars.DEPLOY_BACKEND_PATH != '' &&
-      secrets.SSH_PRIVATE_KEY != ''
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.example.com
 
     steps:
-      # 下载前端产物
-      - name: Download frontend artifact
+      - uses: actions/checkout@v4
+
+      - name: Download frontend build
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
-          path: ./dist
+          path: ./frontend-dist
 
-      # 下载后端源码包
-      - name: Download backend artifact
+      - name: Deploy to staging server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_HOST: ${{ vars.STAGING_HOST }}
+          STAGING_USER: ${{ vars.STAGING_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H $STAGING_HOST >> ~/.ssh/known_hosts
+
+          # 部署前端静态文件
+          rsync -avz --delete ./frontend-dist/ $STAGING_USER@$STAGING_HOST:/var/www/staging/static/
+
+          # 部署后端（使用 Docker）
+          ssh $STAGING_USER@$STAGING_HOST "
+            cd /opt/app &&
+            docker-compose -f docker-compose.staging.yml pull &&
+            docker-compose -f docker-compose.staging.yml up -d &&
+            docker-compose -f docker-compose.staging.yml exec -T backend python manage.py migrate &&
+            docker-compose -f docker-compose.staging.yml exec -T backend python manage.py collectstatic --noinput
+          "
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f https://staging.example.com/api/v1/health || exit 1
+
+  # 部署到生产环境
+  deploy-production:
+    needs: [build-frontend, build-backend]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
+    environment:
+      name: production
+      url: https://example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend build
         uses: actions/download-artifact@v4
         with:
-          name: backend-source
-          path: ./
+          name: frontend-dist
+          path: ./frontend-dist
 
-      # 部署前端静态文件
-      - name: Deploy Frontend
-        uses: appleboy/scp-action@v0.1.7
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
         with:
-          host: ${{ vars.DEPLOY_SERVER_HOST }}
-          username: ${{ vars.DEPLOY_SERVER_USER || 'root' }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ vars.DEPLOY_SERVER_PORT || '22' }}
-          source: "dist/*"
-          target: ${{ vars.DEPLOY_FRONTEND_PATH }}
-          strip_components: 1
+          generate_release_notes: true
+          draft: false
+          prerelease: false
 
-      # 部署后端源码包
-      - name: Deploy Backend Tarball
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ vars.DEPLOY_SERVER_HOST }}
-          username: ${{ vars.DEPLOY_SERVER_USER || 'root' }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ vars.DEPLOY_SERVER_PORT || '22' }}
-          source: "backend.tar.gz"
-          target: /tmp/
-
-      # 服务器端解压、安装、迁移、重启
-      - name: Execute Backend Deployment
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ vars.DEPLOY_SERVER_HOST }}
-          username: ${{ vars.DEPLOY_SERVER_USER || 'root' }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ vars.DEPLOY_SERVER_PORT || '22' }}
-          script: |
-            set -e
-
-            BACKEND_PATH="${{ vars.DEPLOY_BACKEND_PATH }}"
-            VENV_PATH="${{ vars.DEPLOY_VENV_PATH }}"
-            REQUIREMENTS_FILE="${{ vars.PROJECT_REQUIREMENTS_FILE || 'requirements/base.txt' }}"
-            SETTINGS_MODULE="${{ vars.DJANGO_SETTINGS_MODULE || 'config.settings.production' }}"
-            ENABLE_MIGRATE="${{ vars.ENABLE_MIGRATE || 'true' }}"
-            ENABLE_COLLECTSTATIC="${{ vars.ENABLE_COLLECTSTATIC || 'false' }}"
-            RESTART_CMD="${{ vars.DEPLOY_RESTART_COMMAND || 'sudo systemctl restart template-vue3-django-ninja' }}"
-
-            echo "===== 开始部署后端 ====="
-
-            # 进入后端目录（如果不存在则创建）
-            mkdir -p "$BACKEND_PATH"
-            cd "$BACKEND_PATH"
-
-            # 备份当前版本（以防回滚）
-            if [ -d "apps" ] || [ -f "manage.py" ]; then
-              BACKUP_NAME="backup_$(date +%Y%m%d_%H%M%S)"
-              tar -czf "/tmp/$BACKUP_NAME.tar.gz" --exclude='venv' --exclude='__pycache__' . || true
-              echo "已备份: /tmp/$BACKUP_NAME.tar.gz"
-            fi
-
-            # 解压新代码（tarball 包含 backend/ 目录，需要处理层级）
-            tar -xzf /tmp/backend.tar.gz -C /tmp/
-
-            # 将 /tmp/backend/ 下的内容同步到目标路径（保留 venv）
-            rsync -a --delete \
-              --exclude='venv' \
-              --exclude='.env' \
-              --exclude='__pycache__' \
-              --exclude='*.pyc' \
-              --exclude='db.sqlite3' \
-              /tmp/${{ env.BACKEND_DIR }}/ ./ || true
-
-            # 激活虚拟环境（如果配置了）
-            if [ -n "$VENV_PATH" ] && [ -f "$VENV_PATH/bin/activate" ]; then
-              source "$VENV_PATH/bin/activate"
-              echo "已激活虚拟环境: $VENV_PATH"
-            else
-              echo "未配置虚拟环境，使用系统 Python"
-            fi
-
-            # 安装/更新依赖
-            pip install -r "$REQUIREMENTS_FILE" --quiet
-
-            # 设置环境变量（从 Secrets 读取的 SECRET_KEY 等由 systemd 管理，这里仅用于 migrate）
-            export DJANGO_SETTINGS_MODULE="$SETTINGS_MODULE"
-
-            # 数据库迁移（默认开启，可通过变量关闭）
-            if [ "$ENABLE_MIGRATE" == "true" ]; then
-              echo "执行数据库迁移..."
-              python manage.py migrate --noinput
-            else
-              echo "跳过数据库迁移"
-            fi
-
-            # 收集静态文件（可选，主要给 Django Admin 和 API Docs 用）
-            if [ "$ENABLE_COLLECTSTATIC" == "true" ]; then
-              echo "收集静态文件..."
-              python manage.py collectstatic --noinput
-            fi
-
-            # 执行重启命令
-            echo "重启服务..."
-            eval "$RESTART_CMD"
-
-            # 简单健康检查（如果配置了端口）
-            if [ -n "${{ vars.APP_PORT }}" ]; then
-              sleep 3
-              if curl -sf http://127.0.0.1:${{ vars.APP_PORT }}/api/health || curl -sf http://127.0.0.1:${{ vars.APP_PORT }}/api/docs > /dev/null 2>&1; then
-                echo "健康检查通过"
-              else
-                echo "警告：服务可能未正常启动，请手动检查"
-              fi
-            fi
-
-            echo "===== 后端部署完成 ====="
-
-      # 可选：部署通知
-      - name: Notify
-        if: vars.DEPLOY_NOTIFY_WEBHOOK != ''
+      - name: Deploy to production server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_HOST: ${{ vars.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ vars.PRODUCTION_USER }}
         run: |
-          curl -X POST ${{ vars.DEPLOY_NOTIFY_WEBHOOK }} \
-            -H 'Content-Type: application/json' \
-            -d '{"msg":"[Django-Ninja] 部署成功: ${{ github.repository }}@${{ github.sha }}"}' || true
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H $PRODUCTION_HOST >> ~/.ssh/known_hosts
+
+          # 备份数据库
+          ssh $PRODUCTION_USER@$PRODUCTION_HOST "
+            pg_dump -h localhost -U postgres template_db > /backup/db_$(date +%Y%m%d_%H%M%S).sql
+          "
+
+          # 部署前端静态文件
+          rsync -avz --delete ./frontend-dist/ $PRODUCTION_USER@$PRODUCTION_HOST:/var/www/production/static/
+
+          # 部署后端（使用 Docker，蓝绿部署）
+          ssh $PRODUCTION_USER@$PRODUCTION_HOST "
+            cd /opt/app &&
+            # 拉取新镜像
+            docker-compose -f docker-compose.production.yml pull &&
+            # 启动新容器（蓝色）
+            docker-compose -f docker-compose.production.yml up -d backend-blue &&
+            sleep 10 &&
+            # 健康检查
+            curl -f http://localhost:8001/api/v1/health || exit 1 &&
+            # 切换流量到蓝色
+            docker-compose -f docker-compose.production.yml exec nginx nginx -s reload &&
+            # 停止旧容器（绿色）
+            docker-compose -f docker-compose.production.yml stop backend-green &&
+            # 执行迁移
+            docker-compose -f docker-compose.production.yml exec -T backend-blue python manage.py migrate &&
+            docker-compose -f docker-compose.production.yml exec -T backend-blue python manage.py collectstatic --noinput
+          "
+
+      - name: Health check
+        run: |
+          sleep 30
+          curl -f https://example.com/api/v1/health || exit 1
+
+      - name: Notify deployment
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ 生产环境部署失败",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*生产环境部署失败*\n版本: ${{ github.ref }}\n提交: ${{ github.sha }}\n作者: ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # 清理工作
+  cleanup:
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old artifacts
+        uses: geekyeggo/delete-artifact@v4
+        with:
+          name: frontend-dist
+          failOnError: false

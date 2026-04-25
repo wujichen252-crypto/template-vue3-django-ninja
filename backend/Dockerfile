@@ -1,4 +1,4 @@
-FROM python:3.11-slim as base
+FROM ghcr.io/astral-sh/uv:0.5-python3.11-bookworm-slim AS deps
 
 WORKDIR /app
 
@@ -7,9 +7,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements/production.txt /app/requirements.txt
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev
 
-RUN pip install --no-cache-dir -r /app/requirements.txt
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=deps /app/.venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 
 COPY backend/ /app/
 
@@ -17,4 +27,7 @@ RUN python manage.py collectstatic --noinput || true
 
 EXPOSE 8000
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4"]
+# 使用 gunicorn.conf.py 配置文件
+COPY backend/gunicorn.conf.py /app/gunicorn.conf.py
+
+CMD ["gunicorn", "config.wsgi:application", "-c", "gunicorn.conf.py"]

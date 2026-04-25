@@ -3,8 +3,12 @@ import bcrypt
 from django.core.cache import cache
 from typing import Optional
 from apps.users.models import User
-from core.auth import generate_access_token, generate_refresh_token, decode_token
+from core.auth import generate_access_token, generate_refresh_token, decode_token, blacklist_token
 from core.exceptions import AuthenticationError
+from core.cache import cached, cache_evict, get_cache_manager
+
+# 用户缓存管理器（带防穿透、防雪崩、防击穿）
+user_cache = get_cache_manager('user')
 
 
 class UserService:
@@ -38,7 +42,8 @@ class UserService:
             email=email,
             password=hashed_password
         )
-        cls._invalidate_user_cache(user.id)
+        # 新用户注册后，预热缓存
+        cls._warm_user_cache(user)
         return user
 
     @classmethod
@@ -65,6 +70,9 @@ class UserService:
         access_token = generate_access_token(user.id)
         refresh_token = generate_refresh_token(user.id)
 
+        # 登录成功后预热用户缓存
+        cls._warm_user_cache(user)
+
         return {
             'access_token': access_token,
             'refresh_token': refresh_token,
@@ -82,25 +90,39 @@ class UserService:
 
     @classmethod
     def get_user_by_id(cls, user_id: int) -> Optional[User]:
-        """Get user by ID with Redis cache."""
+        """Get user by ID with enhanced Redis cache.
+
+        使用增强型缓存，包含:
+        - 缓存穿透防护（空值缓存）
+        - 缓存雪崩防护（随机过期时间）
+        - 缓存击穿防护（互斥锁）
+        """
         cache_key = f'user:{user_id}'
-        cached_user = cache.get(cache_key)
 
-        if cached_user:
-            return cached_user
+        def fetch_user():
+            try:
+                return User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                return None
 
-        try:
-            user = User.objects.get(id=user_id)
-            cache.set(cache_key, user, timeout=3600)
-            return user
-        except User.DoesNotExist:
-            return None
+        return user_cache.get_or_set(
+            cache_key,
+            fetch_user,
+            timeout=3600,
+            cache_none=True  # 缓存空值防穿透
+        )
+
+    @classmethod
+    def _warm_user_cache(cls, user: User) -> None:
+        """预热用户缓存"""
+        cache_key = f'user:{user.id}'
+        user_cache.set(cache_key, user, timeout=3600)
 
     @classmethod
     def _invalidate_user_cache(cls, user_id: int) -> None:
         """Invalidate user cache when user data is updated."""
         cache_key = f'user:{user_id}'
-        cache.delete(cache_key)
+        user_cache.delete(cache_key)
 
     @classmethod
     def get_user_from_token(cls, token: str) -> Optional[User]:
@@ -140,3 +162,32 @@ class UserService:
             'refresh_token': new_refresh_token,
             'expires_in': 7200,
         }
+
+    @classmethod
+    @cache_evict(key_prefix='user', key_func=lambda user_id: f'user:{user_id}')
+    def update_user(cls, user_id: int, **kwargs) -> User:
+        """Update user info and invalidate cache."""
+        user = User.objects.get(id=user_id)
+        for key, value in kwargs.items():
+            if hasattr(user, key):
+                setattr(user, key, value)
+        user.save()
+        return user
+
+    @classmethod
+    def get_user_by_username(cls, username: str) -> Optional[User]:
+        """Get user by username with cache."""
+        cache_key = f'user:username:{username}'
+
+        def fetch_user():
+            try:
+                return User.objects.get(username=username)
+            except User.DoesNotExist:
+                return None
+
+        return user_cache.get_or_set(
+            cache_key,
+            fetch_user,
+            timeout=1800,  # 30分钟
+            cache_none=True
+        )

@@ -1,0 +1,45 @@
+# CODEOWNERS 文件
+# 定义代码审查者
+# 格式: <文件模式> <审查者>
+
+# 全局默认审查者
+* @admin
+
+# 前端代码
+/frontend/src/ @frontend-team
+/frontend/src/components/ @ui-team
+/frontend/src/api/ @api-team
+
+# 后端代码
+/backend/apps/ @backend-team
+/backend/core/ @backend-team @core-team
+/backend/config/ @devops-team
+
+# 数据库迁移
+/backend/**/migrations/ @backend-team @dba-team
+
+# CI/CD 配置
+/.github/workflows/ @devops-team
+/docker-compose*.yml @devops-team
+/Dockerfile @devops-team
+
+# 文档
+/docs/ @docs-team
+*.md @docs-team
+
+# 测试文件
+*.test.ts @qa-team @frontend-team
+*.test.tsx @qa-team @frontend-team
+*_test.py @qa-team @backend-team
+test_*.py @qa-team @backend-team
+
+# 配置文件
+*.config.ts @frontend-team
+*.config.js @frontend-team
+pyproject.toml @backend-team
+requirements*.txt @backend-team
+
+# 安全相关
+/backend/core/auth.py @security-team
+/backend/core/ratelimit.py @security-team
+/backend/core/cache.py @security-team
